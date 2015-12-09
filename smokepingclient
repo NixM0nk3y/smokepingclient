@@ -1,0 +1,69 @@
+#!/usr/bin/python
+#
+#
+
+import logging
+import os
+import sys
+import time
+import glob
+import shutil
+import errno
+import logging.handlers
+import re
+import subprocess
+import dateutil.parser as dp
+
+from datetime import datetime
+from optparse import OptionParser
+
+class SmokePing:
+        
+    def __init__(self, secret, verbose):
+        self.secret= secret
+
+        self.logger = logging.getLogger('smokeping')
+
+        formatter = logging.Formatter('[%(asctime)s] %(levelname)-8s (%(name)s) %(message)s', datefmt='%c')
+        handler   = logging.StreamHandler() if sys.stdout.isatty() else logging.handlers.WatchedFileHandler('/var/log/smokepingclient.log')
+
+        handler.setFormatter(formatter)
+
+        self.logger.addHandler(handler)
+
+        if verbose:
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
+
+    def run(self):
+
+        self.logger.info('Starting SmokePing Client')
+
+        return
+
+def main():
+
+    parser = OptionParser()
+
+    parser.add_option("-s", "--secret", dest="secret", default='',
+                  help="secret used to auth slave with master", metavar="SECRET")
+
+    parser.add_option("-v", "--verbose",
+                  action="store_true", dest="verbose", default=False,
+                  help="print status messages to stdout")
+
+    (options, args) = parser.parse_args()
+
+    client = SmokePing(
+                          secret = options.secret, 
+                          verbose = options.verbose
+                        )
+
+    client.run()
+
+    return
+
+if __name__ == "__main__":
+    main()
+        

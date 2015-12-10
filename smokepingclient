@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 #
 #
 
@@ -12,15 +12,16 @@ import errno
 import logging.handlers
 import re
 import subprocess
-import dateutil.parser as dp
+import hashlib
+import hmac
+import requests
 
 from datetime import datetime
 from optparse import OptionParser
 
 class SmokePing:
         
-    def __init__(self, secret, verbose):
-        self.secret= secret
+    def __init__(self, slavename, secret, smokeping_master, verbose):
 
         self.logger = logging.getLogger('smokeping')
 
@@ -36,11 +37,167 @@ class SmokePing:
         else:
             self.logger.setLevel(logging.INFO)
 
+
+        self.sleeptime = 300
+
+        self.loop = True
+
+        self.secret = secret
+
+        self.slavename = slavename
+
+        self.smokeping_master = smokeping_master
+
+        self.ping_hosts = [('google','8.8.8.8')]
+                           
+
     def run(self):
 
         self.logger.info('Starting SmokePing Client')
 
+        self.find_gateway()
+
+        self.ping_loop()
+
         return
+
+    def find_gateway(self):
+
+        self.logger.debug('Discovering Gateway')
+
+        route_output = subprocess.check_output(["/sbin/ip","-oneline","-4","route","list","0/0"], stderr=subprocess.STDOUT) 
+
+        #default via 172.29.6.1 dev eth0 
+        gateway = route_output.split()[2]
+
+        self.logger.debug('Found Gateway %s' % gateway)
+
+        self.ping_hosts.append(('gateway',gateway))
+
+        return
+
+    def ping_loop(self):
+
+        self.logger.debug('Starting Ping Loop')
+
+        while self.loop:
+
+
+            start_time = time.time()
+
+            for candidate in self.ping_hosts:
+             
+                (host, ip) = candidate
+
+                self.logger.debug('Pinging Host:%s' % (host) )
+
+                ping_results = self.ping_host(ip)
+
+                self.submit_results(host, ping_results)
+
+            finish_time = time.time()
+          
+            # compensate for length of pings 
+            remainder = self.sleeptime - ( finish_time - start_time )
+
+            self.logger.debug('Sleeping for %d secs' % remainder)
+
+            # sleep until 
+            time.sleep( remainder if remainder > 0 else 0 )
+
+        return
+
+
+    def ping_host(self, ip):
+
+        self.logger.debug('Pinging Host %s' % ip)
+
+        try:
+            output = subprocess.check_output(["/usr/bin/fping","-C","20","-q","-B1","-r1","-i10",ip], stderr=subprocess.STDOUT) 
+
+        except subprocess.CalledProcessError as e:
+
+            # copy exception out and mark as a failure
+            output = e.output
+
+        # 172.17.0.1 : 0.04 0.04 0.04 0.04 0.04 0.04 0.04 0.04 0.04 0.07 0.04 0.04 0.04 0.04 0.04 0.04 0.04 0.07 0.05 0.05
+        [host, pingstring] = output.decode('utf-8').split(':')
+
+        host = host.strip()
+
+        pings = pingstring.strip().split(' ')
+
+        return pings
+
+    def submit_results(self, host, ping_results):
+
+        self.logger.debug('Submitting results for %s' % host)
+
+        fail_count = 0
+        successes = []
+        data_string = ''
+
+        # build a RRD update string based on ping results
+
+        for ping in ping_results:
+
+            if ping == '-':
+
+                data_string += ':U'
+
+                fail_count+=1
+
+            else:
+
+                value = float(ping)/1000
+
+                successes.append(value)
+
+                data_string += ':%0.10e' % value
+
+        # build a full string with some additional stats
+        data_string = "/%s/%s\t%d\tU:%d:%s%s" % (self.slavename, host, int(time.time()), fail_count, self.median(successes), data_string)
+
+        # add a MD5 MAC based on our secret
+        digest = hmac.new( str.encode(self.secret), str.encode(data_string) ).hexdigest()
+
+        # build our post payload
+        payload = {'slave': self.slavename, 'key': digest, 'protocol': 2, 'data': data_string, 'config_time' : int(time.time()) }
+
+        try:
+            # submit payload
+            r = requests.post(self.smokeping_master, data=payload, headers={ 'User-Agent': 'CocoonSmokepingAgent' } )
+
+        except requests.exceptions.ConnectionError as e:
+
+            self.logger.error('Error posting results to %s' % self.smokeping_master)
+
+        return
+
+    def median(self, midlist):
+        '''
+        A very stringy RRD specific median
+
+        '''
+
+        lens = len(midlist)
+
+        if lens == 0:
+            return 'U'
+
+        midlist.sort()
+
+        if lens % 2 != 0: 
+            midl = int(lens / 2)
+            res = midlist[midl]
+        else:
+            odd = int(lens / 2) -1
+            ev = int(lens / 2) 
+
+            res = float(midlist[odd] + midlist[ev]) / float(2)
+    
+        return '%0.10e' % res
+
 
 def main():
 
@@ -49,6 +206,12 @@ def main():
     parser.add_option("-s", "--secret", dest="secret", default='',
                   help="secret used to auth slave with master", metavar="SECRET")
 
+    parser.add_option("-n", "--name", dest="name", default='unconfigured',
+                  help="name of this particular slave", metavar="NAME")
+
+    parser.add_option("-m", "--master", dest="master", default='http://127.0.0.1/smokeping/smokeping.cgi',
+                  help="URI of the smokeping master", metavar="MASTER")
+
     parser.add_option("-v", "--verbose",
                   action="store_true", dest="verbose", default=False,
                   help="print status messages to stdout")
@@ -56,7 +219,9 @@ def main():
     (options, args) = parser.parse_args()
 
     client = SmokePing(
+                          slavename = options.name, 
                           secret = options.secret, 
+                          smokeping_master = options.master, 
                           verbose = options.verbose
                         )
 
